@@ -191,7 +191,12 @@ def macos_open(target: str, **_kwargs: Any) -> str:
         JSON string with {success, opened} or {success: false, error}.
     """
     try:
-        subprocess.run(['open', target], check=True, timeout=15)
+        # URLs and file paths work with plain `open`; app names need `-a`
+        if target.startswith('http://') or target.startswith('https://') or target.startswith('/') or '.' in target.split('/')[-1]:
+            cmd = ['open', target]
+        else:
+            cmd = ['open', '-a', target]
+        subprocess.run(cmd, check=True, timeout=15)
         return json.dumps({'success': True, 'opened': target})
     except subprocess.CalledProcessError as e:
         return json.dumps({'success': False, 'error': str(e)})
