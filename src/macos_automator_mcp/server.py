@@ -189,13 +189,13 @@ _TOOLS: list[types.Tool] = [
 # ---------------------------------------------------------------------------
 
 
-@app.list_tools()
+@app.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
 async def list_tools() -> list[types.Tool]:
     """Return available tools (all 7 if on macOS, or all with macOS note)."""
     return _TOOLS
 
 
-@app.call_tool()
+@app.call_tool()  # type: ignore[untyped-decorator]
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
     """Dispatch tool calls to the appropriate handler."""
     if not tools.is_macos():

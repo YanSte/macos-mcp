@@ -14,7 +14,8 @@ _KB_PATH = Path(__file__).parent / 'kb_data.json'
 @lru_cache(maxsize=1)
 def _load() -> list[dict[str, Any]]:
     """Load and cache the knowledge base from disk."""
-    return json.loads(_KB_PATH.read_text(encoding='utf-8'))  # type: ignore[return-value]
+    data: list[dict[str, Any]] = json.loads(_KB_PATH.read_text(encoding='utf-8'))
+    return data
 
 
 def get_script_by_id(script_id: str) -> dict[str, Any] | None:
@@ -94,19 +95,19 @@ def search(
         term_part = f' matching {search_term!r}' if search_term else ''
         return f'No scripts found{cat_part}{term_part}.'
 
-    lines: list[str] = [f'# macOS Scripts ({len(results)} results)\n']
+    output: list[str] = [f'# macOS Scripts ({len(results)} results)\n']
     for entry in results:
         lang = entry.get('language', 'applescript')
         has_input = entry.get('has_mcp_input', False)
-        lines.append(f'## {entry["title"]}')
-        lines.append(f'**ID:** `{entry["id"]}` | **Category:** {entry["category"]} | **Language:** {lang}')
+        output.append(f'## {entry["title"]}')
+        output.append(f'**ID:** `{entry["id"]}` | **Category:** {entry["category"]} | **Language:** {lang}')
         if has_input:
-            lines.append('**Note:** Supports `input_data` placeholder substitution')
+            output.append('**Note:** Supports `input_data` placeholder substitution')
         if entry.get('description'):
-            lines.append(f'\n{entry["description"]}\n')
-        lines.append(f'```{lang}')
-        lines.append(str(entry.get('script', '')))
-        lines.append('```')
-        lines.append(f'\nTo run: use `macos_run_script` with `kb_script_id="{entry["id"]}"`\n')
+            output.append(f'\n{entry["description"]}\n')
+        output.append(f'```{lang}')
+        output.append(str(entry.get('script', '')))
+        output.append('```')
+        output.append(f'\nTo run: use `macos_run_script` with `kb_script_id="{entry["id"]}"`\n')
 
-    return '\n'.join(lines)
+    return '\n'.join(output)

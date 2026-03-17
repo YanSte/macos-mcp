@@ -154,7 +154,7 @@ def macos_run_script(
         if not entry:
             return json.dumps({'success': False, 'error': f'Unknown kb_script_id: {kb_script_id!r}'})
         script_content = entry['script']
-        language = entry.get('language', 'applescript')  # type: ignore[assignment]
+        language = str(entry.get('language', 'applescript'))
 
     script = _substitute_placeholders(str(script_content), language, input_data, arguments)
     result = _run_osascript(script, language, timeout_seconds, output_format_mode)
@@ -295,11 +295,11 @@ def macos_system(action: str, value: str | None = None, **_kwargs: Any) -> str:
         return json.dumps(_run_osascript(f'set volume output volume {level}'))
 
     if action == 'brightness_set':
-        level = float(value or '0.5')
-        level = max(0.0, min(1.0, level))
+        level_f = float(value or '0.5')
+        level_f = max(0.0, min(1.0, level_f))
         script = (
             'tell application "System Events" to tell process "SystemUIServer" '
-            f'to set value of slider 1 of menu bar item "Displays" of menu bar 2 to {level}'
+            f'to set value of slider 1 of menu bar item "Displays" of menu bar 2 to {level_f}'
         )
         return json.dumps(_run_osascript(script))
 
