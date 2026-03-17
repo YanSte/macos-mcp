@@ -137,26 +137,51 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 
 
 async def main(host: str = '127.0.0.1', port: int = 8765, transport: str = 'stdio') -> None:
-    """Start the MCP server on stdio or HTTP/SSE."""
-    if transport == 'sse':
+    """Start the MCP server on stdio, SSE, or streamable-http."""
+    if transport in ('sse', 'streamable-http'):
         import uvicorn  # type: ignore[import-untyped]
-        from mcp.server.sse import SseServerTransport
         from starlette.applications import Starlette  # type: ignore[import-untyped]
         from starlette.routing import Mount, Route  # type: ignore[import-untyped]
 
-        sse = SseServerTransport('/messages/')
+        if transport == 'streamable-http':
+            import contextlib
 
-        async def handle_sse(request: Any) -> Any:  # noqa: ANN401
-            async with sse.connect_sse(request.scope, request.receive, request._send) as (r, w):
-                await app.run(r, w, app.create_initialization_options())
+            from mcp.server.streamable_http_manager import StreamableHTTPSessionManager  # type: ignore[import-untyped]
 
-        starlette_app = Starlette(
-            routes=[
-                Route('/sse', endpoint=handle_sse),
-                Mount('/messages/', app=sse.handle_post_message),
-            ]
-        )
-        print(f'macos-mcp SSE server running at http://{host}:{port}/sse')
+            session_manager = StreamableHTTPSessionManager(
+                app=app,
+                event_store=None,
+                json_response=False,
+                stateless=False,
+            )
+
+            @contextlib.asynccontextmanager  # type: ignore[arg-type]
+            async def lifespan(starlette_app: Any) -> Any:  # noqa: ANN401
+                async with session_manager.run():
+                    yield
+
+            async def handle_mcp(scope: Any, receive: Any, send: Any) -> None:  # noqa: ANN401
+                await session_manager.handle_request(scope, receive, send)
+
+            starlette_app = Starlette(routes=[Mount('/mcp', app=handle_mcp)], lifespan=lifespan)
+            print(f'macos-mcp streamable-http server running at http://{host}:{port}/mcp')
+        else:
+            from mcp.server.sse import SseServerTransport
+
+            sse = SseServerTransport('/messages/')
+
+            async def handle_sse(request: Any) -> Any:  # noqa: ANN401
+                async with sse.connect_sse(request.scope, request.receive, request._send) as (r, w):
+                    await app.run(r, w, app.create_initialization_options())
+
+            starlette_app = Starlette(
+                routes=[
+                    Route('/sse', endpoint=handle_sse),
+                    Mount('/messages/', app=sse.handle_post_message),
+                ]
+            )
+            print(f'macos-mcp SSE server running at http://{host}:{port}/sse')
+
         uvicorn_config = uvicorn.Config(starlette_app, host=host, port=port, log_level='warning')
         server = uvicorn.Server(uvicorn_config)
         await server.serve()
