@@ -136,7 +136,30 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
 # ---------------------------------------------------------------------------
 
 
-async def main() -> None:
-    """Start the MCP server on stdio."""
-    async with stdio_server() as (read_stream, write_stream):
-        await app.run(read_stream, write_stream, app.create_initialization_options())
+async def main(host: str = '127.0.0.1', port: int = 8765, transport: str = 'stdio') -> None:
+    """Start the MCP server on stdio or HTTP/SSE."""
+    if transport == 'sse':
+        import uvicorn  # type: ignore[import-untyped]
+        from mcp.server.sse import SseServerTransport
+        from starlette.applications import Starlette  # type: ignore[import-untyped]
+        from starlette.routing import Mount, Route  # type: ignore[import-untyped]
+
+        sse = SseServerTransport('/messages/')
+
+        async def handle_sse(request: Any) -> Any:  # noqa: ANN401
+            async with sse.connect_sse(request.scope, request.receive, request._send) as (r, w):
+                await app.run(r, w, app.create_initialization_options())
+
+        starlette_app = Starlette(
+            routes=[
+                Route('/sse', endpoint=handle_sse),
+                Mount('/messages/', app=sse.handle_post_message),
+            ]
+        )
+        print(f'macos-mcp SSE server running at http://{host}:{port}/sse')
+        uvicorn_config = uvicorn.Config(starlette_app, host=host, port=port, log_level='warning')
+        server = uvicorn.Server(uvicorn_config)
+        await server.serve()
+    else:
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(read_stream, write_stream, app.create_initialization_options())
