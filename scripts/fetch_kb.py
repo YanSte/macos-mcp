@@ -1,4 +1,4 @@
-"""Build kb_data.json from locally cloned steipete/macos-automator-mcp knowledge_base."""
+"""Build kb_data.json from a locally cloned macOS automation knowledge base."""
 
 import json
 import re

@@ -2,7 +2,6 @@
 
 Python MCP server for macOS automation via AppleScript and JXA — 498-script knowledge base.
 
-A Python port of [`@steipete/macos-automator-mcp`](https://github.com/steipete/macos-automator-mcp) (TypeScript, MIT).
 Works with any MCP client: Claude Desktop, OpenClaw, Cursor, Hermes Agent, and more.
 
 ## Features
@@ -135,10 +134,6 @@ make typecheck  # pyright + mypy
 make test       # pytest
 make run        # start MCP server
 ```
-
-## Credits
-
-Knowledge base scripts adapted from [`steipete/macos-automator-mcp`](https://github.com/steipete/macos-automator-mcp) (MIT License, Peter Steinberger).
 
 ## License
 
