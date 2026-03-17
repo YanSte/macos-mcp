@@ -11,6 +11,18 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+
+from macos_automator_mcp.models import (
+    ClipboardInput,
+    NotifyInput,
+    OpenInput,
+    RunScriptInput,
+    ScreenshotInput,
+    ScriptingTipsInput,
+    SystemInput,
+)
+
 
 def is_macos() -> bool:
     """Return True if running on macOS."""
@@ -33,7 +45,6 @@ def _coerce_to_applescript(value: Any) -> str:  # noqa: ANN401
     if isinstance(value, list):
         items = ', '.join(_coerce_to_applescript(v) for v in value)
         return f'{{{items}}}'
-    # Default: string
     escaped = str(value).replace('\\', '\\\\').replace('"', '\\"')
     return f'"{escaped}"'
 
@@ -68,12 +79,9 @@ def _substitute_placeholders(
     if input_data:
         for key, val in input_data.items():
             literal = coerce(val)
-            # Quoted placeholder variants
             script = script.replace(f'"--MCP_INPUT:{key}"', literal)
             script = script.replace(f"'--MCP_INPUT:{key}'", literal)
-            # JS template literal style
             script = re.sub(rf'\$\{{inputData\.{re.escape(key)}\}}', literal, script)
-            # Bare expression context: (--MCP_INPUT:key) or =--MCP_INPUT:key
             script = re.sub(rf'\(--MCP_INPUT:{re.escape(key)}\)', f'({literal})', script)
             script = re.sub(rf'=--MCP_INPUT:{re.escape(key)}', f'={literal}', script)
 
@@ -115,58 +123,71 @@ def _run_osascript(
         return {'success': False, 'error': str(e)}
 
 
+def _validation_error(e: ValidationError) -> str:
+    """Serialize a Pydantic ValidationError to a JSON error response."""
+    errors = []
+    for err in e.errors(include_url=False):
+        # ctx may contain non-serializable exceptions — convert to string
+        if 'ctx' in err:
+            err = {**err, 'ctx': {k: str(v) for k, v in err['ctx'].items()}}
+        errors.append(err)
+    return json.dumps({'success': False, 'error': errors})
+
+
 # ---------------------------------------------------------------------------
 # Public tool functions
 # ---------------------------------------------------------------------------
 
 
-def macos_run_script(
-    script_content: str | None = None,
-    language: str = 'applescript',
-    kb_script_id: str | None = None,
-    input_data: dict[str, Any] | None = None,
-    arguments: list[Any] | None = None,
-    timeout_seconds: int = 60,
-    output_format_mode: str = 'auto',
-    **_kwargs: Any,
-) -> str:
-    """Run AppleScript or JXA, optionally using a knowledge base script by ID.
+def macos_run_script(**kwargs: Any) -> str:
+    """Run AppleScript or JXA, optionally using a knowledge base script by ID."""
+    try:
+        inp = RunScriptInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
 
-    Args:
-        script_content: Inline script code. Mutually exclusive with kb_script_id.
-        language: 'applescript' (default) or 'javascript'.
-        kb_script_id: ID of a pre-built script from the knowledge base.
-        input_data: Dict of {key: value} for --MCP_INPUT:key placeholder substitution.
-        arguments: List of positional args for --MCP_ARG_1..N substitution.
-        timeout_seconds: Execution timeout in seconds (default 60).
-        output_format_mode: 'auto', 'human_readable', or 'structured'.
+    script_content = inp.script_content
+    language: str = inp.language
 
-    Returns:
-        JSON string with {success, output} or {success: false, error}.
-    """
-    if not script_content and not kb_script_id:
-        return json.dumps({'success': False, 'error': 'Provide script_content or kb_script_id'})
-
-    if kb_script_id:
+    if inp.kb_script_id:
         from macos_automator_mcp.kb import get_script_by_id
 
-        entry = get_script_by_id(kb_script_id)
+        entry = get_script_by_id(inp.kb_script_id)
         if not entry:
-            return json.dumps({'success': False, 'error': f'Unknown kb_script_id: {kb_script_id!r}'})
-        script_content = entry['script']
-        language = str(entry.get('language', 'applescript'))
+            return json.dumps({'success': False, 'error': f'Unknown kb_script_id: {inp.kb_script_id!r}'})
+        script_content = str(entry['script'])
+        raw_lang = str(entry.get('language', 'applescript'))
+        language = raw_lang if raw_lang in ('applescript', 'javascript') else 'applescript'
 
-    script = _substitute_placeholders(str(script_content), language, input_data, arguments)
-    result = _run_osascript(script, language, timeout_seconds, output_format_mode)
+    script = _substitute_placeholders(str(script_content), language, inp.input_data, inp.arguments)
+    result = _run_osascript(script, language, inp.timeout_seconds, inp.output_format_mode)
     return json.dumps(result)
 
 
-def macos_screenshot(**_kwargs: Any) -> str:
-    """Take a screenshot and return it as a base64-encoded PNG.
+def macos_scripting_tips(**kwargs: Any) -> str:
+    """Search the knowledge base. Returns formatted markdown results."""
+    try:
+        inp = ScriptingTipsInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
 
-    Returns:
-        JSON string with {success, image_base64, format} or {success: false, error}.
-    """
+    from macos_automator_mcp.kb import search
+
+    return search(
+        search_term=inp.search_term,
+        category=inp.category,
+        list_categories_only=inp.list_categories,
+        limit=inp.limit,
+    )
+
+
+def macos_screenshot(**kwargs: Any) -> str:
+    """Take a screenshot and return it as a base64-encoded PNG."""
+    try:
+        ScreenshotInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
+
     try:
         with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as f:
             tmp = f.name
@@ -181,18 +202,18 @@ def macos_screenshot(**_kwargs: Any) -> str:
         return json.dumps({'success': False, 'error': str(e)})
 
 
-def macos_open(target: str, **_kwargs: Any) -> str:
-    """Open an application, file, or URL using the macOS `open` command.
-
-    Args:
-        target: App name (e.g. 'Calculator'), file path, or URL.
-
-    Returns:
-        JSON string with {success, opened} or {success: false, error}.
-    """
+def macos_open(**kwargs: Any) -> str:
+    """Open an application, file, or URL using the macOS open command."""
     try:
-        # URLs and file paths work with plain `open`; app names need `-a`
-        if target.startswith('http://') or target.startswith('https://') or target.startswith('/') or '.' in target.split('/')[-1]:
+        inp = OpenInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
+
+    try:
+        target = inp.target
+        is_url = target.startswith('http://') or target.startswith('https://')
+        is_path = target.startswith('/') or '.' in target.split('/')[-1]
+        if is_url or is_path:
             cmd = ['open', target]
         else:
             cmd = ['open', '-a', target]
@@ -204,89 +225,53 @@ def macos_open(target: str, **_kwargs: Any) -> str:
         return json.dumps({'success': False, 'error': str(e)})
 
 
-def macos_clipboard(action: str, text: str | None = None, **_kwargs: Any) -> str:
-    """Read from or write to the macOS clipboard.
+def macos_clipboard(**kwargs: Any) -> str:
+    """Read from or write to the macOS clipboard."""
+    try:
+        inp = ClipboardInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
 
-    Args:
-        action: 'read' to get clipboard contents, 'write' to set clipboard.
-        text: Text to write (required when action='write').
-
-    Returns:
-        JSON string with {success, text} or {success: false, error}.
-    """
-    if action == 'read':
+    if inp.action == 'read':
         try:
             result = subprocess.run(['pbpaste'], capture_output=True, text=True, timeout=5)
             return json.dumps({'success': True, 'text': result.stdout})
         except Exception as e:
             return json.dumps({'success': False, 'error': str(e)})
-    elif action == 'write':
-        if text is None:
-            return json.dumps({'success': False, 'error': "text is required for action='write'"})
+    else:
+        # inp.text is guaranteed non-None for 'write' by model_validator
         try:
-            subprocess.run(['pbcopy'], input=text, text=True, check=True, timeout=5)
-            return json.dumps({'success': True, 'text': text})
+            subprocess.run(['pbcopy'], input=inp.text, text=True, check=True, timeout=5)
+            return json.dumps({'success': True, 'text': inp.text})
         except Exception as e:
             return json.dumps({'success': False, 'error': str(e)})
-    else:
-        return json.dumps({'success': False, 'error': f"Unknown action {action!r}. Use 'read' or 'write'."})
 
 
-def macos_notify(title: str, message: str, subtitle: str = '', **_kwargs: Any) -> str:
-    """Send a macOS system notification.
+def macos_notify(**kwargs: Any) -> str:
+    """Send a macOS system notification."""
+    try:
+        inp = NotifyInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
 
-    Args:
-        title: Notification title.
-        message: Notification body text.
-        subtitle: Optional subtitle.
-
-    Returns:
-        JSON string with {success} or {success: false, error}.
-    """
-    subtitle_part = f' subtitle "{subtitle}"' if subtitle else ''
-    script = f'display notification "{message}" with title "{title}"{subtitle_part}'
+    subtitle_part = f' subtitle "{inp.subtitle}"' if inp.subtitle else ''
+    script = f'display notification "{inp.message}" with title "{inp.title}"{subtitle_part}'
     result = _run_osascript(script)
     return json.dumps(result)
 
 
-_SYSTEM_ACTIONS = {
-    'volume_get',
-    'volume_set',
-    'brightness_set',
-    'dark_mode_toggle',
-    'sleep_display',
-    'lock_screen',
-    'list_apps',
-    'quit_app',
-    'say',
-    'do_not_disturb_on',
-    'do_not_disturb_off',
-}
+def macos_system(**kwargs: Any) -> str:
+    """Perform macOS system-level actions."""
+    try:
+        inp = SystemInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
 
-
-def macos_system(action: str, value: str | None = None, **_kwargs: Any) -> str:
-    """Perform macOS system-level actions.
-
-    Args:
-        action: One of: volume_get, volume_set, brightness_set, dark_mode_toggle,
-                sleep_display, lock_screen, list_apps, quit_app, say,
-                do_not_disturb_on, do_not_disturb_off.
-        value: Numeric or string parameter (e.g. volume level 0-100, app name, text to speak).
-
-    Returns:
-        JSON string with action result.
-    """
-    if action not in _SYSTEM_ACTIONS:
-        return json.dumps(
-            {
-                'success': False,
-                'error': f'Unknown action {action!r}. Valid: {sorted(_SYSTEM_ACTIONS)}',
-            }
-        )
+    action = inp.action
+    value = inp.value
 
     if action == 'volume_get':
-        script = 'output volume of (get volume settings)'
-        result = _run_osascript(script)
+        result = _run_osascript('output volume of (get volume settings)')
         if result.get('success'):
             try:
                 result['volume'] = int(result['output'])
@@ -295,13 +280,11 @@ def macos_system(action: str, value: str | None = None, **_kwargs: Any) -> str:
         return json.dumps(result)
 
     if action == 'volume_set':
-        level = int(value or '50')
-        level = max(0, min(100, level))
+        level = max(0, min(100, int(value or '50')))
         return json.dumps(_run_osascript(f'set volume output volume {level}'))
 
     if action == 'brightness_set':
-        level_f = float(value or '0.5')
-        level_f = max(0.0, min(1.0, level_f))
+        level_f = max(0.0, min(1.0, float(value or '0.5')))
         script = (
             'tell application "System Events" to tell process "SystemUIServer" '
             f'to set value of slider 1 of menu bar item "Displays" of menu bar 2 to {level_f}'
@@ -328,19 +311,13 @@ def macos_system(action: str, value: str | None = None, **_kwargs: Any) -> str:
         return json.dumps(_run_osascript(script))
 
     if action == 'quit_app':
-        app = value or ''
-        if not app:
-            return json.dumps({'success': False, 'error': 'value (app name) is required for quit_app'})
-        script = f'tell application "{app}" to quit'
+        script = f'tell application "{value}" to quit'
         return json.dumps(_run_osascript(script))
 
     if action == 'say':
-        text = value or ''
-        if not text:
-            return json.dumps({'success': False, 'error': 'value (text) is required for say'})
         try:
-            subprocess.run(['say', text], check=True, timeout=60)
-            return json.dumps({'success': True, 'spoken': text})
+            subprocess.run(['say', str(value)], check=True, timeout=60)
+            return json.dumps({'success': True, 'spoken': value})
         except Exception as e:
             return json.dumps({'success': False, 'error': str(e)})
 
