@@ -32,7 +32,7 @@ dev = [
 ]
 
 [project.scripts]
-macos-mcp = 'macos_automator_mcp.__main__:main'
+macos-mcp = 'macos_automator_mcp.__main__:run'
 
 [tool.hatch.build.targets.wheel]
 packages = ['src/macos_automator_mcp']
