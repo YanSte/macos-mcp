@@ -48,11 +48,17 @@ def _score(entry: dict[str, Any], term: str) -> float:
     return title_score * 0.4 + id_score * 0.3 + kw_score * 0.2 + desc_score * 0.1 + script_score * 0.05
 
 
+def refresh() -> None:
+    """Clear the in-memory knowledge base cache so it reloads from disk on next access."""
+    _load.cache_clear()
+
+
 def search(
     search_term: str | None = None,
     category: str | None = None,
     list_categories_only: bool = False,
     limit: int = 10,
+    refresh_first: bool = False,
 ) -> str:
     """Search the knowledge base and return formatted markdown results.
 
@@ -61,10 +67,13 @@ def search(
         category: Filter by category slug (e.g. 'safari', 'messages').
         list_categories_only: If True, return only the category list.
         limit: Maximum number of results to return.
+        refresh_first: If True, clear cache before loading.
 
     Returns:
         Formatted markdown string with matching scripts.
     """
+    if refresh_first:
+        _load.cache_clear()
     all_scripts = _load()
 
     if list_categories_only:

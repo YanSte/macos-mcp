@@ -1,4 +1,4 @@
-"""MCP server definition — registers all 7 macOS automation tools."""
+"""MCP server definition — registers all 8 macOS automation tools."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from macos_automator_mcp import tools
 from macos_automator_mcp.models import (
+    AccessibilityQueryInput,
     ClipboardInput,
     NotifyInput,
     OpenInput,
@@ -81,6 +82,11 @@ _TOOLS: list[types.Tool] = [
         description=_desc(SystemInput),
         inputSchema=_schema(SystemInput),
     ),
+    types.Tool(
+        name='macos_accessibility_query',
+        description=_desc(AccessibilityQueryInput),
+        inputSchema=_schema(AccessibilityQueryInput),
+    ),
 ]
 
 
@@ -91,7 +97,7 @@ _TOOLS: list[types.Tool] = [
 
 @app.list_tools()  # type: ignore[no-untyped-call, untyped-decorator]
 async def list_tools() -> list[types.Tool]:
-    """Return the 7 available macOS automation tools."""
+    """Return the 8 available macOS automation tools."""
     return _TOOLS
 
 
@@ -117,6 +123,8 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextCont
         result = tools.macos_notify(**arguments)
     elif name == 'macos_system':
         result = tools.macos_system(**arguments)
+    elif name == 'macos_accessibility_query':
+        result = tools.macos_accessibility_query(**arguments)
     else:
         result = json.dumps({'success': False, 'error': f'Unknown tool: {name}'})
 

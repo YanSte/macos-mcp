@@ -8,12 +8,14 @@ import platform
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from macos_automator_mcp.models import (
+    AccessibilityQueryInput,
     ClipboardInput,
     NotifyInput,
     OpenInput,
@@ -69,9 +71,13 @@ def _substitute_placeholders(
     language: str,
     input_data: dict[str, Any] | None,
     arguments: list[Any] | None,
-) -> str:
-    """Replace --MCP_INPUT:key and --MCP_ARG_N placeholders in script."""
+) -> tuple[str, list[str]]:
+    """Replace --MCP_INPUT:key and --MCP_ARG_N placeholders in script.
+
+    Returns (substituted_script, substitution_logs).
+    """
     is_js = language == 'javascript'
+    logs: list[str] = []
 
     def coerce(v: Any) -> str:  # noqa: ANN401
         return _coerce_to_jxa(v) if is_js else _coerce_to_applescript(v)
@@ -79,20 +85,62 @@ def _substitute_placeholders(
     if input_data:
         for key, val in input_data.items():
             literal = coerce(val)
-            script = script.replace(f'"--MCP_INPUT:{key}"', literal)
-            script = script.replace(f"'--MCP_INPUT:{key}'", literal)
-            script = re.sub(rf'\$\{{inputData\.{re.escape(key)}\}}', literal, script)
-            script = re.sub(rf'\(--MCP_INPUT:{re.escape(key)}\)', f'({literal})', script)
-            script = re.sub(rf'=--MCP_INPUT:{re.escape(key)}', f'={literal}', script)
+            patterns = [
+                f'"--MCP_INPUT:{key}"',
+                f"'--MCP_INPUT:{key}'",
+                rf'${{inputData\.{re.escape(key)}}}',
+                rf'\(--MCP_INPUT:{re.escape(key)}\)',
+                rf'=--MCP_INPUT:{re.escape(key)}',
+            ]
+            did_sub = False
+            new_script = script.replace(f'"--MCP_INPUT:{key}"', literal)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = script.replace(f"'--MCP_INPUT:{key}'", literal)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = re.sub(rf'\$\{{inputData\.{re.escape(key)}\}}', literal, script)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = re.sub(rf'\(--MCP_INPUT:{re.escape(key)}\)', f'({literal})', script)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = re.sub(rf'=--MCP_INPUT:{re.escape(key)}', f'={literal}', script)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            _ = patterns  # referenced above; kept to satisfy linters
+            if did_sub:
+                logs.append(f'Substituted input_data[{key!r}] → {literal}')
+            else:
+                logs.append(f'No placeholder found for input_data[{key!r}]')
 
     if arguments:
         for idx, val in enumerate(arguments, 1):
             literal = coerce(val)
-            script = script.replace(f'"--MCP_ARG_{idx}"', literal)
-            script = script.replace(f"'--MCP_ARG_{idx}'", literal)
-            script = re.sub(rf'\$\{{arguments\[{idx - 1}\]\}}', literal, script)
+            did_sub = False
+            new_script = script.replace(f'"--MCP_ARG_{idx}"', literal)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = script.replace(f"'--MCP_ARG_{idx}'", literal)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            new_script = re.sub(rf'\$\{{arguments\[{idx - 1}\]\}}', literal, script)
+            if new_script != script:
+                did_sub = True
+            script = new_script
+            if did_sub:
+                logs.append(f'Substituted arguments[{idx - 1}] → {literal}')
+            else:
+                logs.append(f'No placeholder found for arguments[{idx - 1}]')
 
-    return script
+    return script, logs
 
 
 def _run_osascript(
@@ -104,12 +152,46 @@ def _run_osascript(
     """Execute script via osascript. Returns {success, output, error}."""
     lang_flag = 'JavaScript' if language == 'javascript' else 'AppleScript'
     cmd = ['osascript', '-l', lang_flag]
+
+    # Determine -s flags
     if output_format == 'human_readable':
         cmd += ['-s', 'h']
-    elif output_format == 'structured':
+    elif output_format == 'structured_error':
         cmd += ['-s', 's']
+    elif output_format == 'structured_output_and_error':
+        cmd += ['-s', 'ss']
+    elif output_format == 'auto':
+        # AppleScript gets human-readable by default; JXA gets direct (no flags)
+        if language != 'javascript':
+            cmd += ['-s', 'h']
+    # 'direct' and JXA auto → no flags
+
     cmd += ['-e', script]
 
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return {'success': True, 'output': result.stdout.strip()}
+        return {'success': False, 'error': result.stderr.strip() or f'Exit code {result.returncode}'}
+    except subprocess.TimeoutExpired:
+        return {'success': False, 'error': f'Script timed out after {timeout}s'}
+    except FileNotFoundError:
+        return {'success': False, 'error': 'osascript not found — only available on macOS'}
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+
+def _run_osascript_file(
+    script_path: str,
+    language: str = 'applescript',
+    arguments: list[Any] | None = None,
+    timeout: int = 60,
+) -> dict[str, Any]:
+    """Execute a script file via osascript. Returns {success, output, error}."""
+    lang_flag = 'JavaScript' if language == 'javascript' else 'AppleScript'
+    cmd = ['osascript', '-l', lang_flag, script_path]
+    if arguments:
+        cmd += [str(a) for a in arguments]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         if result.returncode == 0:
@@ -148,7 +230,23 @@ def macos_run_script(**kwargs: Any) -> str:
 
     script_content = inp.script_content
     language: str = inp.language
+    result: dict[str, Any]
 
+    # --- script_path branch: execute file directly ---
+    if inp.script_path:
+        path = Path(inp.script_path)
+        if not path.exists():
+            return json.dumps({'success': False, 'error': f'script_path not found: {inp.script_path!r}'})
+        # Infer language from extension if needed
+        if path.suffix.lower() in ('.js', '.jxa'):
+            language = 'javascript'
+        t0 = time.monotonic() if inp.report_execution_time else 0.0
+        result = _run_osascript_file(inp.script_path, language, inp.arguments, inp.timeout_seconds)
+        if inp.report_execution_time:
+            result['execution_time_seconds'] = round(time.monotonic() - t0, 3)
+        return json.dumps(result)
+
+    # --- kb_script_id branch ---
     if inp.kb_script_id:
         from macos_automator_mcp.kb import get_script_by_id
 
@@ -159,8 +257,20 @@ def macos_run_script(**kwargs: Any) -> str:
         raw_lang = str(entry.get('language', 'applescript'))
         language = raw_lang if raw_lang in ('applescript', 'javascript') else 'applescript'
 
-    script = _substitute_placeholders(str(script_content), language, inp.input_data, inp.arguments)
-    result = _run_osascript(script, language, inp.timeout_seconds, inp.output_format_mode)
+    # --- inline script_content branch ---
+    final_script, sub_logs = _substitute_placeholders(str(script_content), language, inp.input_data, inp.arguments)
+
+    t0 = time.monotonic() if inp.report_execution_time else 0.0
+    result = _run_osascript(final_script, language, inp.timeout_seconds, inp.output_format_mode)
+    if inp.report_execution_time:
+        result['execution_time_seconds'] = round(time.monotonic() - t0, 3)
+
+    if inp.include_executed_script_in_output:
+        result['executed_script'] = final_script
+
+    if inp.include_substitution_logs and sub_logs:
+        result['substitution_logs'] = sub_logs
+
     return json.dumps(result)
 
 
@@ -178,6 +288,7 @@ def macos_scripting_tips(**kwargs: Any) -> str:
         category=inp.category,
         list_categories_only=inp.list_categories,
         limit=inp.limit,
+        refresh_first=inp.refresh_database,
     )
 
 
@@ -330,3 +441,90 @@ def macos_system(**kwargs: Any) -> str:
         return json.dumps(_run_osascript(script))
 
     return json.dumps({'success': False, 'error': f'Unhandled action: {action}'})
+
+
+def macos_accessibility_query(**kwargs: Any) -> str:
+    """Inspect or interact with macOS UI elements via the Accessibility framework."""
+    try:
+        inp = AccessibilityQueryInput(**kwargs)
+    except ValidationError as e:
+        return _validation_error(e)
+
+    # Build ax binary command
+    # ax <app> <role> [--match key=value ...] [--action <action>] [--all] [--format smart|verbose|text]
+    cmd = ['ax', inp.locator.app, inp.locator.role]
+
+    # Match attributes
+    for k, v in inp.locator.match.items():
+        cmd += ['--match', f'{k}={v}']
+
+    # Navigation path hint
+    if inp.locator.navigation_path_hint:
+        for segment in inp.locator.navigation_path_hint:
+            cmd += ['--path', segment]
+
+    # Output format
+    cmd += ['--format', inp.output_format]
+
+    # Return all matches
+    if inp.return_all_matches:
+        cmd += ['--all']
+
+    # Max elements
+    cmd += ['--max-elements', str(inp.max_elements)]
+
+    # Attributes to query
+    if inp.attributes_to_query:
+        for attr in inp.attributes_to_query:
+            cmd += ['--attr', attr]
+
+    # Required action filter
+    if inp.required_action_name:
+        cmd += ['--required-action', inp.required_action_name]
+
+    # Debug logging
+    if inp.debug_logging:
+        cmd += ['--debug']
+
+    # Perform action
+    if inp.command == 'perform' and inp.action_to_perform:
+        cmd += ['--action', inp.action_to_perform]
+
+    t0 = time.monotonic() if inp.report_execution_time else 0.0
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        output = result.stdout
+        # Truncate to limit lines
+        lines = output.splitlines()
+        truncated = len(lines) > inp.limit
+        if truncated:
+            lines = lines[: inp.limit]
+        response: dict[str, Any] = {
+            'success': result.returncode == 0,
+            'output': '\n'.join(lines),
+        }
+        if truncated:
+            response['truncated'] = True
+            response['total_lines'] = len(output.splitlines())
+        if result.returncode != 0:
+            response['error'] = result.stderr.strip() or f'ax exited with code {result.returncode}'
+        if inp.debug_logging and result.stderr:
+            response['debug'] = result.stderr.strip()
+        if inp.report_execution_time:
+            response['execution_time_seconds'] = round(time.monotonic() - t0, 3)
+        return json.dumps(response)
+    except FileNotFoundError:
+        return json.dumps(
+            {
+                'success': False,
+                'error': (
+                    'ax binary not found. Install it or grant Accessibility permission. '
+                    'See: System Settings → Privacy & Security → Accessibility'
+                ),
+            }
+        )
+    except subprocess.TimeoutExpired:
+        return json.dumps({'success': False, 'error': 'Accessibility query timed out after 30s'})
+    except Exception as e:
+        return json.dumps({'success': False, 'error': str(e)})

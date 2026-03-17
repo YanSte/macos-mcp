@@ -3,7 +3,7 @@
 from macos_automator_mcp.server import _TOOLS
 
 
-def test_all_seven_tools_registered() -> None:
+def test_all_eight_tools_registered() -> None:
     names = {t.name for t in _TOOLS}
     expected = {
         'macos_run_script',
@@ -13,6 +13,7 @@ def test_all_seven_tools_registered() -> None:
         'macos_clipboard',
         'macos_notify',
         'macos_system',
+        'macos_accessibility_query',
     }
     assert names == expected
 

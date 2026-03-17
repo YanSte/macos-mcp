@@ -1,4 +1,4 @@
-"""Pydantic input models for all 7 macOS MCP tools.
+"""Pydantic input models for all 8 macOS MCP tools.
 
 Each model is the single source of truth for:
 - parameter names, types, defaults
@@ -13,14 +13,30 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+OutputFormatMode = Literal[
+    'auto',
+    'human_readable',
+    'structured_error',
+    'structured_output_and_error',
+    'direct',
+]
+
 
 class RunScriptInput(BaseModel):
-    """Run an AppleScript or JXA script inline, or execute a pre-built script from the 498-script knowledge base.
+    """Run an AppleScript or JXA script inline, from a file path, or from the 498-script knowledge base.
     Controls any scriptable macOS app: Safari, Messages, Mail, Finder, Calendar, Terminal, Xcode, Spotify, and more."""
 
     script_content: str | None = Field(
         default=None,
-        description='Inline AppleScript or JXA source code to execute directly. Mutually exclusive with kb_script_id.',
+        description='Inline AppleScript or JXA source code to execute directly.',
+    )
+    script_path: str | None = Field(
+        default=None,
+        description=(
+            'Absolute path to an AppleScript or JXA file to execute '
+            '(e.g. "/Users/me/scripts/my_script.applescript"). '
+            'Mutually exclusive with script_content and kb_script_id.'
+        ),
     )
     language: Literal['applescript', 'javascript'] = Field(
         default='applescript',
@@ -43,7 +59,10 @@ class RunScriptInput(BaseModel):
     )
     arguments: list[Any] | None = Field(
         default=None,
-        description='Positional arguments substituted into --MCP_ARG_1, --MCP_ARG_2, … placeholders in the script.',
+        description=(
+            'Positional arguments substituted into --MCP_ARG_1, --MCP_ARG_2, … placeholders. '
+            "For script_path, passed as argv to the script's on run handler."
+        ),
     )
     timeout_seconds: int = Field(
         default=60,
@@ -51,20 +70,38 @@ class RunScriptInput(BaseModel):
         le=3600,
         description='Maximum seconds to wait for the script to complete. Default 60, max 3600.',
     )
-    output_format_mode: Literal['auto', 'human_readable', 'structured'] = Field(
+    output_format_mode: OutputFormatMode = Field(
         default='auto',
         description=(
-            'Output formatting: '
-            '"auto" returns the raw osascript output; '
-            '"human_readable" adds -s h flag for human-readable output; '
-            '"structured" adds -s s flag to parse output as structured data.'
+            'osascript output formatting:\n'
+            '  "auto" — AppleScript gets -s h (human-readable), JXA gets no flags (direct)\n'
+            '  "human_readable" — force -s h\n'
+            '  "structured_error" — force -s s (structured error reporting)\n'
+            '  "structured_output_and_error" — force -s ss (structured output + errors)\n'
+            '  "direct" — no -s flags (recommended for JXA)'
         ),
+    )
+    include_executed_script_in_output: bool = Field(
+        default=False,
+        description='If true, append the full executed script text to the response (useful for debugging).',
+    )
+    include_substitution_logs: bool = Field(
+        default=False,
+        description='If true, include detailed logs of placeholder substitutions performed on the script.',
+    )
+    report_execution_time: bool = Field(
+        default=False,
+        description='If true, include the script execution duration in the response.',
     )
 
     @model_validator(mode='after')
-    def requires_script_or_id(self) -> RunScriptInput:
-        if not self.script_content and not self.kb_script_id:
-            raise ValueError('Provide either script_content (inline code) or kb_script_id (knowledge base ID)')
+    def requires_one_source(self) -> RunScriptInput:
+        sources = [self.script_content, self.script_path, self.kb_script_id]
+        if not any(sources):
+            raise ValueError(
+                'Provide exactly one of: script_content (inline code), '
+                'script_path (file path), or kb_script_id (knowledge base ID)'
+            )
         return self
 
 
@@ -99,6 +136,10 @@ class ScriptingTipsInput(BaseModel):
         ge=1,
         le=100,
         description='Maximum number of results to return. Default 10, max 100.',
+    )
+    refresh_database: bool = Field(
+        default=False,
+        description='If true, force a reload of the knowledge base from disk before searching.',
     )
 
 
@@ -200,4 +241,112 @@ class SystemInput(BaseModel):
         needs_value = ('volume_set', 'brightness_set', 'quit_app', 'say')
         if self.action in needs_value and not self.value:
             raise ValueError(f'value is required for action="{self.action}"')
+        return self
+
+
+# ---------------------------------------------------------------------------
+# Accessibility query
+# ---------------------------------------------------------------------------
+
+
+class AccessibilityLocator(BaseModel):
+    """Specifies which UI element(s) to target in the accessibility tree."""
+
+    app: str = Field(
+        description='Application to target by display name or bundle ID (e.g. "Safari", "com.apple.Safari").',
+    )
+    role: str = Field(
+        description=(
+            'Accessibility role of the target element (e.g. "AXButton", "AXStaticText", "AXTextField", "AXWebArea").'
+        ),
+    )
+    match: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            'Key/value pairs of AX attributes to match. '
+            'Use {} to match any element with the given role. '
+            'Example: {"AXTitle": "Submit"} or {"AXFocused": "true"}.'
+        ),
+    )
+    navigation_path_hint: list[str] | None = Field(
+        default=None,
+        description=(
+            'Optional path within the app hierarchy to narrow the search. '
+            'Example: ["window[1]", "toolbar[1]"]. Speeds up queries on complex UIs.'
+        ),
+    )
+
+
+class AccessibilityQueryInput(BaseModel):
+    """Inspect or interact with any UI element in any macOS application using the Accessibility framework.
+    Requires the ax binary and Accessibility permission in System Settings → Privacy & Security → Accessibility.
+    Use command="query" to read UI state and command="perform" to click buttons or trigger actions."""
+
+    command: Literal['query', 'perform'] = Field(
+        description=(
+            '"query" — retrieve attributes and properties of matching UI elements; '
+            '"perform" — execute an action on a matched element (e.g. click a button).'
+        ),
+    )
+    locator: AccessibilityLocator = Field(
+        description='Specifies the app, role, and attribute filters to find the target UI element(s).',
+    )
+    return_all_matches: bool = Field(
+        default=False,
+        description='If true, return all matching elements. If false (default), return only the first match.',
+    )
+    attributes_to_query: list[str] | None = Field(
+        default=None,
+        description=(
+            'Specific AX attributes to include in the response. '
+            'If omitted, common attributes are returned. '
+            'Examples: ["AXRole", "AXTitle", "AXValue", "AXDescription", "AXPosition", "AXSize"].'
+        ),
+    )
+    required_action_name: str | None = Field(
+        default=None,
+        description=(
+            'Filter results to only elements that support this action. '
+            'Example: "AXPress" to find only clickable elements.'
+        ),
+    )
+    action_to_perform: str | None = Field(
+        default=None,
+        description=(
+            'The accessibility action to execute when command is "perform". '
+            'Common values: "AXPress" (click), "AXFocus", "AXShowMenu".'
+        ),
+    )
+    output_format: Literal['smart', 'verbose', 'text_content'] = Field(
+        default='smart',
+        description=(
+            'Controls verbosity of the ax binary output:\n'
+            '  "smart" — readable key/value pairs, omits empty attributes (default)\n'
+            '  "verbose" — all attributes including empty ones, best for debugging\n'
+            '  "text_content" — compact text extraction only (AXValue, AXTitle); ignores attributes_to_query'
+        ),
+    )
+    limit: int = Field(
+        default=500,
+        ge=1,
+        description='Maximum number of output lines to return. Output is truncated if it exceeds this.',
+    )
+    max_elements: int = Field(
+        default=200,
+        ge=1,
+        description='Maximum number of UI elements to process when return_all_matches is true.',
+    )
+    debug_logging: bool = Field(
+        default=False,
+        description='If true, include debug output from the ax binary in the response.',
+    )
+    report_execution_time: bool = Field(
+        default=False,
+        description='If true, include the query execution duration in the response.',
+    )
+
+    @model_validator(mode='after')
+    def perform_requires_action(self) -> AccessibilityQueryInput:
+        if self.command == 'perform' and not self.action_to_perform:
+            raise ValueError('action_to_perform is required when command is "perform"')
         return self
